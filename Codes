@@ -1,0 +1,243 @@
+import requests
+import csv
+import os
+import logging
+import re
+import urllib3
+from pyquery import PyQuery as pq
+from requests.exceptions import RequestException
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
+
+
+urllib3.disable_warnings()
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')      # 日志模块
+
+FETCH_MAX_RETRY_TIMES = 10      # 最大请求重试次数
+FETCH_TIMEOUT = 8    # 请求超时时间
+
+lock = Lock()   # 线程锁
+executor = ThreadPoolExecutor(max_workers=20)   # 线程池
+
+# 请求头，伪造浏览器
+headers = {
+    'authority': 'www.openstack.org',
+    'pragma': 'no-cache',
+    'cache-control': 'no-cache',
+    'upgrade-insecure-requests': '1',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36',
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+    'sec-fetch-site': 'none',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-user': '?1',
+    'sec-fetch-dest': 'document',
+    'accept-language': 'zh-CN,zh;q=0.9'
+}
+
+# 首字母链接
+letter_url = {
+    'A': 'https://www.openstack.org/community/members/?letter=A',
+    'B': 'https://www.openstack.org/community/members/?letter=B',
+    'C': 'https://www.openstack.org/community/members/?letter=C',
+    'D': 'https://www.openstack.org/community/members/?letter=D',
+    'E': 'https://www.openstack.org/community/members/?letter=E',
+    'F': 'https://www.openstack.org/community/members/?letter=F',
+    'G': 'https://www.openstack.org/community/members/?letter=G',
+    'H': 'https://www.openstack.org/community/members/?letter=H',
+    'I': 'https://www.openstack.org/community/members/?letter=I',
+    'J': 'https://www.openstack.org/community/members/?letter=J',
+    'K': 'https://www.openstack.org/community/members/?letter=K',
+    'L': 'https://www.openstack.org/community/members/?letter=L',
+    'M': 'https://www.openstack.org/community/members/?letter=M',
+    'N': 'https://www.openstack.org/community/members/?letter=N',
+    'O': 'https://www.openstack.org/community/members/?letter=O',
+    'P': 'https://www.openstack.org/community/members/?letter=P',
+    'Q': 'https://www.openstack.org/community/members/?letter=Q',
+    'R': 'https://www.openstack.org/community/members/?letter=R',
+    'S': 'https://www.openstack.org/community/members/?letter=S',
+    'T': 'https://www.openstack.org/community/members/?letter=T',
+    'U': 'https://www.openstack.org/community/members/?letter=U',
+    'V': 'https://www.openstack.org/community/members/?letter=V',
+    'W': 'https://www.openstack.org/community/members/?letter=W',
+    'X': 'https://www.openstack.org/community/members/?letter=X',
+    'Y': 'https://www.openstack.org/community/members/?letter=Y',
+    'Z': 'https://www.openstack.org/community/members/?letter=Z',
+    'International Characters': 'https://www.openstack.org/community/members/?letter=intl'
+}
+
+def fetch(url, data=None, need_vpn=False):
+    """请求函数"""
+    failed_times = 0    # 请求失败次数
+    if need_vpn:    # 使用vpn
+        proxy = '127.0.0.1:10809'
+        proxies = {
+            'http': f'http://{proxy}',
+            'https': f'https://{proxy}',
+        }
+    else:
+        proxy = None
+        proxies = {}
+
+    while True:
+        try:
+            if data is None:
+                logging.info(f'GET {url} Proxy: {proxy}')
+                response = requests.get(url, headers=headers, timeout=FETCH_TIMEOUT, verify=False, proxies=proxies)
+            else:
+                logging.info(f'POST {url} Proxy: {proxy}')
+                response = requests.post(url, headers=headers, timeout=FETCH_TIMEOUT, data=data, verify=False, proxies=proxies)
+
+        except RequestException as e:   # 请求异常
+            failed_times += 1
+            if failed_times < FETCH_MAX_RETRY_TIMES:
+                logging.error(f'Retry [{failed_times}] | {type(e)} | {url}')
+                continue
+            else:
+                logging.error(f'Retry [{failed_times}] failed, pass | {type(e)} | {url}')
+                return None
+
+        else:   # 请求无异常
+            if response.status_code == 200:
+                logging.info(f'{response} | {url}')
+                return response
+            else:
+                logging.error(f'{response} | {url}')
+                if response.status_code == 404:
+                    return None
+                else:
+                    failed_times += 1
+                    if failed_times < FETCH_MAX_RETRY_TIMES:
+                        logging.error(f'Retry [{failed_times}] | {response} | {url}')
+                        continue
+                    else:
+                        logging.error(f'Retry [{failed_times}] failed, pass | {response} | {url}')
+                        return None
+
+def get_people_urls(letter, url):
+    """获取人员详情链接"""
+    response = fetch(url, need_vpn=True)
+    if response:
+        doc = pq(response.text)
+        for a in doc('.filter li a').items():
+            detail = {
+                'letter': letter,
+                'name': a.text().strip(),
+                'url': 'https://www.openstack.org' + a.attr('href')
+            }
+            save_csv(detail, f'openstack_urls.csv')
+
+def parse_detail(row):
+    """获取人物详情信息"""
+    letter = row[0]
+    url = row[-1]
+    response = fetch(url, need_vpn=True)
+    if response:
+        doc = pq(response.text)
+        detail = {
+            'letter': row[0],
+            'name': row[1],
+            'aff': '',
+            'exist': True,
+            'url': url
+        }
+        aff = re.search(r'Affiliations\n(.*)', doc('.details').text().strip())      # 正则匹配 Affiliations 信息
+        detail['aff'] = aff.group(1) if aff else ''
+
+    else:
+        detail = {
+            'letter': row[0],
+            'name': row[1],
+            'aff': '',
+            'exist': False,
+            'url': url
+        }
+
+    save_csv(detail, f'openstack_affiliations_{letter}.csv')
+
+def calc():
+    """人员匹配公司"""
+    coms1 = ['AT&T', 'Red Hat', 'HUAWEI', 'windriver', 'wind river', 'WNDRVR']
+    coms2 = ['华为'， '红帽']
+
+    # for letter in letter_url.keys():
+    #     d = {}
+    #     for each in coms1:
+    #         d[each] = []
+    #
+    #     if letter == 'International Characters':
+    #         continue
+    #
+    #     for idx, row in read_csv(f'./affiliations/openstack_affiliations_{letter}.csv'):
+    #         aff = row[2]
+    #         for com in coms1:
+    #             if com.lower() in aff.lower():
+    #                 d[com].append(row[-1])
+    #
+    #     for k, v in d.items():
+    #         detail = {
+    #             'company': k,
+    #             'urls': '\n'.join(v)
+    #         }
+    #         save_csv(detail, f'openstack_{letter}.csv')
+
+    d = {}
+    for each in coms1 + coms2:
+        d[each] = []
+
+    for idx, row in read_csv('./affiliations/openstack_affiliations_International Characters.csv'):
+        aff = row[2]
+        for com in coms1 + coms2:
+            if com.lower() in aff.lower():
+                d[com].append(row[-1])
+
+    for k, v in d.items():
+        detail = {
+            'company': k,
+            'urls': '\n'.join(v)
+        }
+        save_csv(detail, f'openstack_International Characters.csv')
+
+def read_csv(csv_filename):
+    """读取csv"""
+    with open(csv_filename, encoding='utf8') as f:
+        reader = csv.reader(f)
+        next(reader)
+        for idx, row in enumerate(reader):
+            if idx >= 0:
+                yield idx, row
+
+def save_csv(detail, csv_filename):
+    """save csv"""
+    lock.acquire()
+
+    if isinstance(detail, dict):
+        if not os.path.exists(csv_filename):
+            with open(csv_filename, 'a', encoding='utf-8-sig', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(detail.keys()))
+                writer.writeheader()
+                writer.writerow(detail)
+        else:
+            with open(csv_filename, 'a', encoding='utf-8-sig', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(detail.keys()))
+                writer.writerow(detail)
+
+        print(detail)
+
+    lock.release()
+
+def run():
+    # 1.先保存人员链接
+    # for letter, url in letter_url.items():
+    #     executor.submit(get_people_urls, *[letter, url])
+
+    # 2.再获取人员详情信息
+    # for idx, row in read_csv('openstack_urls.csv'):
+    #     executor.submit(parse_detail, row)
+
+    # 3.最后匹配并保存人员公司信息
+    calc()
+
+
+if __name__ == '__main__':
+    run()
